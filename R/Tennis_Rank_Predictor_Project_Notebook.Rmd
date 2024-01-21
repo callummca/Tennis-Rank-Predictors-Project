@@ -5,18 +5,19 @@ output: html_notebook
 
 Tennis betting is a popular form of sports gambling (Czermak, 2021; Powell, 2021). However, betting experience or knowledge of the game do not give gamblers a particular advantage, which makes determining what players to place bets on difficult (Huberfeld et al., 2012). In addition, both sports companies and scouts have a similar issue with identifying what metrics best predict a player's potential and what makes a player more likely to win (Graham, 2022). Evidently, predicting the success of a tennis player is crucial to scouts, sport betters, and sport companies. By determining the most effective statistical indicators for predicting player ranking, methods to predict their success can be achieved.
 
-# Question
+## Question
 
 Can a male tennis player's statistics be used to predict their rank?
 
 The dataset “Game results for Top 500 Players from 2017-2019” created by Jeff Sackmann was used to answer this question.
 
-# Exploratory Data Analysis
+## Exploratory Data Analysis
 
 ```{r}
-#call required libraries
+#install/call required libraries
 library(tidyverse)
 library(tidymodels)
+library(kknn)
 
 #read in data
 game_results <- read_csv("https://raw.githubusercontent.com/callummca/Tennis-Rank-Predictors-Project/main/atp2017-2019.csv")
@@ -113,4 +114,503 @@ colnames(player_stats_train) <- c("ace", "height", "df", "first_in", "first_won 
 
 Based on the summary statistics, we can see that outliers have a minimal influence on the data (median and mean are almost equal), meaning they will not skew results which would limit the strength of conclusions.
 
+```{r}
+#rename columns for graph
+colnames(player_stats_train) <- c("Ace Rate", "player_rank", "Player Age", "Height (cm)", "Double Fault Rate", "First Serve In Rate", 
+                                       "First Serve Won Rate", "Second Serve Won Rate")
 
+#gather data into format compatible for facet_wrap
+results_gathered <- player_stats_train %>%
+    as_tibble() %>%
+    gather(key = "variable", value = "value", -player_rank)
+
+#plot height versus each response variable 
+ggplot(results_gathered, aes(y = player_rank, x = value)) +
+    geom_point() +
+    ggtitle("The Relationship Between Potential Predictors and Player Rank") +
+    labs(y = "Player Rank", x = "Value of Each Predictor") +
+    facet_wrap(~variable, scales = "free") 
+
+#return column names to previous convention
+colnames(player_stats_train) <- c("ace", "player_rank", "player_age", "height", "df", "first_in", "first_won", "second_won")
+```
+Based on the above visualizations, the following predictor variables will not be effective predictors: Second Serve Won Rate, Double Fault Rate, and First Serve In Rate. The data points for Second Serve Won Rate and Double Fault Rate are extremely condensed and similar. Therefore, these variables won’t be effective predictors since all players regardless of rank place similarly under them. For First Serve In Rate, the data is generally evenly distributed across ranking levels. Therefore, this variable will not be effective as it will predict a similar rank for each proportion of first serve in.
+
+Physical characteristics do not show a clear relationship with ranking except that players in the extremes are more likely to have a better rating.
+
+None of the plotted variables (except for rate of first serve success, ace rate, rate of first serve in), have clear negative correlations.
+
+## Methods
+
+To determine the association between predictor variables and rank, we will use KNN regression. Regression is used over classification as we are using quantitative values. KNN regression is used instead of linear regression due to the weak linear relationships in most of the above plots. We will visualize this process by demonstrating the KNN regression on plots for each of the predictors. We will employ the above method to all of the predictors except for Second Serve Won Rate, Double Fault Rate, and First Serve In Rate (for reasons explained earlier).
+
+## Expected Outcomes
+
+We predict that age should not be predictive of ranking as skill and physical attributes are seemingly more important factors. Height should be predictive of ranking as taller players have a serving advantage, meaning they should win more matches and rank better. However, this may be a weak relationship as it could be that players who are shorter are faster and more agile, potentially mitigating the positive impact of height. Ultimately, we predict that the rate a player wins their first serve and completes an ace will be the predictive variables with the strongest rank association as they are skills, so if a player places higher under these variables, they should win more matches, and thus rank better.
+
+## Data Analysis
+
+### KNN Regression with the selected predictor variables
+
+**1. Ace Rate** <br>
+**2. Player Age** <br>
+**3. Height (cm)** <br>
+**4. First Serve Won Rate (FSWT)** <br>
+
+### Predicting Player Rank with Ace Rate
+
+##### 1. Tuning the model
+Data must be standardized to ensure differences in range or mean of variables don't influence the model. Additionally, in order to find the optimal k value for the predictor variable in question, we must tune our model as well as specify it to perform KNN regression by computing straight line distances. Finally, we combine the recipe and model into a workflow to later apply them both to the training data.
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Create recipe for preprocessing the data, scaling and centering predictors
+ace_recipe <- recipe( player_rank ~ ace, data = player_stats_train) |>
+  step_scale(all_predictors()) |>
+  step_center(all_predictors())
+
+#Create model specification for tuning to find the best value for K
+ace_spec <- nearest_neighbor(weight_func = "rectangular", 
+                              neighbors = tune()) |>
+                              set_engine("kknn") |>
+                              set_mode("regression")
+
+#Combine recipe and model into a workflow
+ace_wkflw <- workflow() |>
+  add_recipe(ace_recipe) |>
+  add_model(ace_spec)
+```
+
+##### 2. Performing Cross Validation
+
+We performed a 5-fold cross validation to find the optimal number of neighbors for the predictor variable. First we created a 5-fold cross validation object to specify 5 chunks to act as validation sets. The gridvals object contains values to test as k, ranging from 1 to 10. We then performed cross validation using the grid of k values on the training set/validation set splits, filtering for the rmspe output as this represents the model's accuracy. Finally, we filtered for the minimum mean, as this outputs the row containing the k value associated with the smallest rmspe (ie. highest accuracy).
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Create a 5-fold cross validation object 
+vfold <- vfold_cv(player_stats_train, v = 5, strata = player_rank)
+
+#Create a grid of numbers to test as values for k
+gridvals <- tibble(neighbors = seq(from = 1, to = 10, by = 1))
+
+#Perform cross validation on grid of numbers, filtering for rmspse 
+ace_results <- ace_wkflw |>
+  tune_grid(resamples = vfold, grid = gridvals) |>
+  collect_metrics() |>
+  filter(.metric == "rmse") 
+
+#Filter for the minimum rmspe 
+ace_min <- ace_results |>
+  filter(mean == min(mean))
+ace_min
+```
+
+##### 3. Evaluating on the Test Set
+
+The model must be retrained with the previously obtained k value, and recombined into a workflow with the original recipe. The workflow is then applied to the testing data set to assess the model's accuracy on data it has not been exposed to before, comparing the true player_rank value to the model's prediction (under .pred). Filtering for rmspe as this value represents model accuracy by estimating how large the average error is.
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Assign k value associated with the minimum rmspe to an object
+ace_kmin <- ace_min |> pull(neighbors)
+
+#Retrain the model on selected k value 
+ace_spec <- nearest_neighbor(weight_func = "rectangular", neighbors = ace_kmin) |>
+  set_engine("kknn") |>
+  set_mode("regression")
+
+#Combine recipe and retrained model into a new workflow
+ace_fit <- workflow() |>
+  add_recipe(ace_recipe) |>
+  add_model(ace_spec) |>
+  fit(data = player_stats_train)
+
+#Calculate the rmspe on the testing data set to assess prediction accuracy
+ace_summary <- ace_fit |>
+  predict(player_stats_test) |>
+  bind_cols(player_stats_test) |>
+  metrics(truth = player_rank, estimate = .pred) |>
+  filter(.metric == 'rmse')
+ace_summary
+```
+##### 4. Visualizing Predictions
+
+First a range of possible values the predictor variable can hold is created as a tibble, and then combined into a data frame containing each of the KNN model's predicted values of Player Rank. The relationship between the predictor variable and player rank is then visualized as a scatter plot, and the model's predictions on the created range of values are included as a line. The line helps us understand how the chosen k value functions with our created KNN regression model on potential new data compared to the values the model was trained with.
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Create a tibble with a range of possible predictor values
+ace_preds <- tibble(ace = seq(from = 0, to = 0.25, by = 0.03))
+
+ace_preds <- ace_fit |>
+  predict(ace_preds) |>
+  bind_cols(ace_preds)
+
+#Create a scatter plot of predictions across the range of values 
+ace_plot_final <- ggplot(player_stats_train, aes(x = ace, y = player_rank)) +
+  geom_point(alpha = 0.4) +
+  geom_line(data = ace_preds, 
+            mapping = aes(x = ace, y = .pred), 
+            color = "blue") +
+  xlab("Ace Rate") +
+  ylab("Player Ranking") +
+  ggtitle(paste0("Figure 1: ", "K = ", ace_kmin)) + 
+  theme(text = element_text(size = 12))
+ace_plot_final
+```
+The KNN-Regression line visualizes how the model predicts player ranking on the basis of neighbouring Ace Rate data using two neighbours. It is apparent that the model does not predict the ranking of outliers well, as they are far from the regression line.
+
+We will now repeat the above process with the other three predictors.
+
+### Predicting Player Rank with Player Age
+
+##### 1. Tuning the model
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Create recipe for preprocessing the data, scaling and centering predictors
+age_recipe <- recipe(player_rank ~ player_age, data = player_stats_train) |>
+  step_scale(all_predictors()) |>
+  step_center(all_predictors())
+
+#Create model specification for tuning to find the best value for K
+age_spec <- nearest_neighbor(weight_func = "rectangular", 
+                              neighbors = tune()) |>
+                              set_engine("kknn") |>
+                              set_mode("regression")
+
+#Combine recipe and model into a workflow
+age_wkflw <- workflow() |>
+  add_recipe(age_recipe) |>
+  add_model(age_spec)
+```
+
+#### 2. Performing Cross Validation
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Create a 5-fold cross validation object 
+vfold <- vfold_cv(player_stats_train, v = 5, strata = player_rank)
+
+#Create a grid of numbers to test as values for k
+gridvals <- tibble(neighbors = seq(from = 1, to = 10, by = 1))
+
+#Perform cross validation on grid of numbers, filtering for rmspse 
+age_results <- age_wkflw |>
+  tune_grid(resamples = vfold, grid = gridvals) |>
+  collect_metrics() |>
+  filter(.metric == "rmse")
+
+#Filter for the minimum rmspe 
+age_min <- age_results |>
+  filter(mean == min(mean))
+age_min
+```
+#### 3. Evaluating on the Test Set
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Assign k value associated with the minimum rmspe to an object
+age_kmin <- age_min |> pull(neighbors)
+
+#Retrain the model on selected k value 
+age_spec <- nearest_neighbor(weight_func = "rectangular", neighbors = age_kmin) |>
+  set_engine("kknn") |>
+  set_mode("regression")
+
+#Combine recipe and retrained model into a new workflow
+age_fit <- workflow() |>
+  add_recipe(age_recipe) |>
+  add_model(age_spec) |>
+  fit(data = player_stats_train)
+
+#Calculate the rmspe on the testing data set to assess prediction accuracy
+age_summary <- age_fit |>
+  predict(player_stats_test) |>
+  bind_cols(player_stats_test) |>
+  metrics(truth = player_rank, estimate = .pred) |>
+  filter(.metric == 'rmse')
+age_summary
+```
+#### 4. Visualizing Predictions
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Create a tibble with a range of possible predictor values
+age_preds <- tibble(player_age = seq(from = 20, to = 40, by = 2))
+
+age_preds <- age_fit |>
+  predict(age_preds) |>
+  bind_cols(age_preds)
+
+#Create a scatter plot of predictions across the range of values 
+age_plot_final <- ggplot(player_stats_train, aes(x = player_age, y = player_rank)) +
+  geom_point(alpha = 0.4) +
+  geom_line(data = age_preds, 
+            mapping = aes(x = player_age, y = .pred), 
+            color = "blue") +
+  xlab("Player Age (Years)") +
+  ylab("Player Ranking") +
+  ggtitle(paste0("Figure 2: ", "K = ", age_kmin)) + 
+  theme(text = element_text(size = 12))
+age_plot_final
+```
+The KNN-Regression line visualizes how the model predicts player ranking based on age (K=10). This model does not predict outliers accurately, as they deviate far from the regression line.
+
+### Predicting Player Rank with Player Height (cm)
+
+#### 1. Tuning the model
+```{r}
+#set the seed
+set.seed(15)
+
+#Create recipe for preprocessing the data, scaling and centering predictors
+height_recipe <- recipe(player_rank ~ height, data = player_stats_train) |>
+  step_scale(all_predictors()) |>
+  step_center(all_predictors())
+
+#Create model specification for tuning to find the best value for K
+height_spec <- nearest_neighbor(weight_func = "rectangular", 
+                              neighbors = tune()) |>
+                              set_engine("kknn") |>
+                              set_mode("regression")
+
+#Combine recipe and model into a workflow
+height_wkflw <- workflow() |>
+  add_recipe(height_recipe) |>
+  add_model(height_spec)
+```
+
+#### 2. Performing Cross Validation
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Create a 5-fold cross validation object 
+vfold <- vfold_cv(player_stats_train, v = 5, strata = player_rank)
+
+#Create a grid of numbers to test as values for k
+gridvals <- tibble(neighbors = seq(from = 1, to = 10, by = 1))
+
+#Perform cross validation on grid of numbers, filtering for rmspse 
+height_results <- height_wkflw |>
+  tune_grid(resamples = vfold, grid = gridvals) |>
+  collect_metrics() |>
+  filter(.metric == "rmse") 
+
+#Filter for the minimum rmspe 
+height_min <- height_results |>
+  filter(mean == min(mean))
+```
+
+#### 3. Evaluating on the Test Set
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Assign k value associated with the minimum rmspe to an object
+height_kmin <- height_min |> pull(neighbors)
+
+#Retrain the model on selected k value 
+height_spec <- nearest_neighbor(weight_func = "rectangular", neighbors = height_kmin) |>
+  set_engine("kknn") |>
+  set_mode("regression")
+
+#Combine recipe and retrained model into a new workflow
+height_fit <- workflow() |>
+  add_recipe(height_recipe) |>
+  add_model(height_spec) |>
+  fit(data = player_stats_train)
+
+#Calculate the rmspe on the testing data set to assess prediction accuracy
+height_summary <- height_fit |>
+  predict(player_stats_test) |>
+  bind_cols(player_stats_test) |>
+  metrics(truth = player_rank, estimate = .pred) |>
+  filter(.metric == 'rmse')
+height_summary
+```
+#### 4. Visualizing Predictions
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Create a tibble with a range of possible predictor values
+height_preds <- tibble(height = seq(from = 150, to = 225, by = 15))
+
+height_preds <- height_fit |>
+  predict(height_preds) |>
+  bind_cols(height_preds)
+
+#Create a scatter plot of predictions across the range of values 
+height_plot_final <- ggplot(player_stats_train, aes(x = height, y = player_rank)) +
+  geom_point(alpha = 0.4) +
+  geom_line(data = height_preds, 
+            mapping = aes(x = height, y = .pred), 
+            color = "blue") +
+  xlab("Height (cm)") +
+  ylab("Player Ranking") +
+  ggtitle(paste0("Figure 3: ", "K = ", height_kmin)) + 
+  theme(text = element_text(size = 12))
+height_plot_final
+```
+The KNN-Regression line illustrates the model's ability to forecast player ranking using the known height data (K=10). However, it is evident that the model performs poorly in predicting the ranking of outliers, as they are located far from the regression line.
+
+### Predicting Player Rank with a Player's First Serve Won Rate
+
+#### 1. Tuning the model
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Create recipe for preprocessing the data, scaling and centering predictors
+fw_recipe <- recipe(player_rank ~ first_won, data = player_stats_train) |>
+  step_scale(all_predictors()) |>
+  step_center(all_predictors())
+
+#Create model specification for tuning to find the best value for K
+fw_spec <- nearest_neighbor(weight_func = "rectangular", 
+                              neighbors = tune()) |>
+                              set_engine("kknn") |>
+                              set_mode("regression")
+
+#Combine recipe and model into a workflow
+fw_wkflw <- workflow() |>
+  add_recipe(fw_recipe) |>
+  add_model(fw_spec)
+```
+
+#### 2. Performing Cross Validation
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Create a 5-fold cross validation object 
+vfold <- vfold_cv(player_stats_train, v = 5, strata = player_rank)
+
+#Create a grid of numbers to test as values for k
+gridvals <- tibble(neighbors = seq(from = 1, to = 10, by = 1))
+
+#Perform cross validation on grid of numbers, filtering for rmspse 
+fw_results <- fw_wkflw |>
+  tune_grid(resamples = vfold, grid = gridvals) |>
+  collect_metrics() |>
+  filter(.metric == "rmse") 
+
+#Filter for the minimum rmspe 
+fw_min <- fw_results |>
+  filter(mean == min(mean))
+fw_min
+```
+
+#### 3. Evaluating on the Test Set
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Assign k value associated with the minimum rmspe to an object
+fw_kmin <- fw_min |> pull(neighbors)
+
+#Retrain the model on selected k value 
+fw_spec <- nearest_neighbor(weight_func = "rectangular", neighbors = fw_kmin) |>
+  set_engine("kknn") |>
+  set_mode("regression")
+
+#Combine recipe and retrained model into a new workflow
+fw_fit <- workflow() |>
+  add_recipe(fw_recipe) |>
+  add_model(fw_spec) |>
+  fit(data = player_stats_train)
+
+#Calculate the rmspe on the testing data set to assess prediction accuracy
+fw_summary <- fw_fit |>
+  predict(player_stats_test) |>
+  bind_cols(player_stats_test) |>
+  metrics(truth = player_rank, estimate = .pred) |>
+  filter(.metric == 'rmse')
+fw_summary
+```
+#### 4. Visualizing Predictions
+
+```{r}
+#set the seed
+set.seed(15)
+
+#Create a tibble with a range of possible predictor values
+fw_preds <- tibble(first_won = seq(from = 0.3, to = 0.6, by = 0.05))
+
+fw_preds <- fw_fit |>
+  predict(fw_preds) |>
+  bind_cols(fw_preds)
+
+#Create a scatter plot of predictions across the range of values 
+fw_plot_final <- ggplot(player_stats_train, aes(x = first_won, y = player_rank)) +
+  geom_point(alpha = 0.4) +
+  geom_line(data = fw_preds, 
+            mapping = aes(x = first_won, y = .pred), 
+            color = "blue") +
+  xlab("First Serve Won Rate") +
+  ylab("Player Ranking") +
+  ggtitle( paste0("Figure 4: ","K = ", fw_kmin)) + 
+  theme(text = element_text(size = 12)) 
+fw_plot_final
+```
+The KNN-Regression line visualizes how the model predicts player ranking on the basis of neighbouring FSWR data (K=7). It is apparent that the model does not predict the ranking of outliers well, as they are far from the regression line.
+
+## Discussion 
+
+### Findings
+
+Age was the most accurate predictor for a male tennis player’s ranking, providing the smallest RMSPE at 67.7. This means the KNN regression model predicted player rankings with an average error of around 68 ranks (out of 500). The height model gave an RMSPE of 68.1, slightly less accurate than age as a predictor. Ace rate as a predictor provided an RMSPE of 70.7. FSWT provided an RMSPE of 84.3, meaning this variable was the least accurate predictor of the studied four.
+
+Ultimately, all of the predictors were poor as the best accuracy was still off by 67.7 rankings points on average.
+
+### Is this what we expected to find?
+
+This study was set out to identify if a male tennis player's statistics could be used to predict their rank. It was expected that the FSWT and Ace Rate would be the strongest predictors as it seemed intuitive that players with better performance statistics would place higher in tennis rankings. Both these predictions were not supported by the results of this statistical analysis. Rather, physical characteristics (Height and Age) were better predictors.
+
+A potential reason for this result is due to the nature of the variables related to skill that were used. The ace rate is a powerful skill, but it occurs rarely. Therefore, even if a player has an exceptional ace rate, it is not powerful enough to determine if they are better than others (who may be more skilled in more important areas). This logic can also be applied to the other skill variable: FSWT. Consequently, the accuracy of both of the predictors based on a player's performance metrics are potentially undermined.
+
+Physical characteristics were better predictors than anticipated. This may be due to physical attributes having an impact on all skill metrics. For instance, if a tennis player is taller, this means they will likely have a better serve and ace rate in general. As a consequence, height (and potentially other physical attributes) could be a better predictor than just ace rate as it is potentially more representative of a player’s overall skill level.
+
+Findings could also be attributed to the study’s powerful limitation of small sample size. When tidying the data, incomplete rows were excluded to ensure the players used were included in each of the models. For height, the amount of data provided was severely limited, with few players having theirs listed. A small data set can limit results as there are less points to use in training the model, meaning it has less information for predicting new observations. Additionally the lack of data points led to a smaller testing set, so the RMSPE value was obtained with less “test predictions'' than ideal. Limited amount of data points likely doesn’t represent the distribution of the male tennis player population. Caution should be exercised when interpreting the results of the study, and further research with a larger sample size should be conducted to confirm the findings.
+
+It is worth noting that the RMSPE’s of the physical characteristic predictors were not much smaller than those of the models using performance metrics. The predictive accuracy obtained could be due to chance of how the data was split and other randomized steps in the data analysis, including the choice of seed value.
+
+### Potential Impacts
+
+The findings of this study can prove impactful in developing methods to predict which players will achieve success, as there are certain player traits and statistics that have proven to predict one’s rank better than others. The best predictors identified to forecast rank can be used by scouts to search for specific traits in players, allow for more informed and accurate bets, and allow companies to more strategically select athletes to sponsor.
+
+### References
+
+Czermak, C. (2021). Tennis popularity statistics 2021. Tennis Creative. https://tenniscreative.com/tennis-popularity-statistics/
+
+Graham, M. (2022). Tennis talent scout explains key metrics he looks for in youngsters. Tennishead. https://tennishead.net/top-tennis-talent-scout-explains-key-metrics-he-looks-for-in-young-players/
+
+Huberfeld, R., Gersner, R., Rosenberg, O., Kotler, M., & Dannon, P. N. (2012). Football gambling three arm-controlled study: Gamblers, amateurs and laypersons. Psychopathology, 46(1), 28–33. https://doi.org/10.1159/000338614
+
+Powell, E. (2021). 5 sports that are most popular in Europe by their betting volume. EDM Chicago. https://www.edmchicago.com/sports-popular-in-europe-by-betting-volume/
+
+Sackmann, J. (n.d.). ATP Tennis Rankings, results, and stats. GitHub. https://github.com/JeffSackmann/tennis_atp
