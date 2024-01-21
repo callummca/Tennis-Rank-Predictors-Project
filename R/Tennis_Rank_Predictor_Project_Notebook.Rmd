@@ -1,19 +1,116 @@
 ---
-title: "R Notebook"
+title: "Predicting Male Tennis Player Rankings"
 output: html_notebook
 ---
 
-This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+Tennis betting is a popular form of sports gambling (Czermak, 2021; Powell, 2021). However, betting experience or knowledge of the game do not give gamblers a particular advantage, which makes determining what players to place bets on difficult (Huberfeld et al., 2012). In addition, both sports companies and scouts have a similar issue with identifying what metrics best predict a player's potential and what makes a player more likely to win (Graham, 2022). Evidently, predicting the success of a tennis player is crucial to scouts, sport betters, and sport companies. By determining the most effective statistical indicators for predicting player ranking, methods to predict their success can be achieved.
 
-Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+# Question
+
+Can a male tennis player's statistics be used to predict their rank?
+
+The dataset “Game results for Top 500 Players from 2017-2019” created by Jeff Sackmann was used to answer this question.
+
+# Exploratory Data Analysis
 
 ```{r}
-plot(cars)
+#call required libraries
+library(tidyverse)
+library(tidymodels)
+
+#read in data
+game_results <- read_csv("https://raw.githubusercontent.com/callummca/Tennis-Rank-Predictors-Project/main/atp2017-2019.csv")
 ```
 
-Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+The final variables chosen were Ace Rate, Double Fault Rate, First Serve In Rate, First Serve Won Rate, Height (cm), Player Age, and Second Serve Won Rate. These variables provide meaningful insights into a player's skill level and potential physical advantage.
 
-When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+Each row was initially a match, so we split the winner and loser players and then combined them into a dataset with each row being a single player’s statistics.
 
-The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+```{r}
+#select needed columns related to the results of winners
+#needed was determined on the basis of if a variable was a relevant tennis performance statistic or a physical characteristic
+winner_results <- game_results|>
+    select(winner_name, winner_rank, winner_age, winner_ht, w_ace, w_svpt, w_df, w_1stIn, w_1stWon, w_2ndWon)
+
+#renamed column names so that a players stats from a lost/won game can be combined using the rbind function
+colnames(winner_results) <- c("player_name", "player_rank", "player_age", "player_ht", "player_ace", "player_svpt", "player_df", 
+                             "player_1stIn", "player_1stWon", "player_2ndWon")
+
+#selected needed colomns related to the results of losers
+loser_results <- game_results|>
+    select(loser_name, loser_rank, loser_age, loser_ht, l_ace, l_svpt, l_df, l_1stIn, l_1stWon, l_2ndWon)
+
+#renamed column names so that a players stats from a lost/won game can be combined using the rbind function
+colnames(loser_results) <- c("player_name", "player_rank", "player_age", "player_ht", "player_ace", "player_svpt", "player_df", 
+                             "player_1stIn", "player_1stWon", "player_2ndWon")
+
+#combined both the loser_results and winner_results datasets into one dataset where wins/losses is not considered
+combined_results <- rbind(winner_results, loser_results)
+```
+
+Changing the performance statistics into proportions according to the amount of serves made for more accurate comparison.
+
+```{r}
+#converted total stats per match to rate of each stat occuring per serve point
+#example: rather than having the total aces per match, the rate of successful aces / total number of serves
+combined_results <- combined_results |>
+    mutate(player_ace = player_ace / player_svpt,
+           player_df = player_df / player_svpt,
+           player_1stIn = player_1stIn / player_svpt,
+           player_1stWon = player_1stWon / player_svpt,
+           player_2ndWon = player_2ndWon / player_svpt) |>
+           select(player_name, player_rank, player_age, player_ace, player_df, player_1stIn, player_1stWon, player_2ndWon, player_ht)
+
+print(combined_results)
+```
+
+Group_by and summarize were used to create one dataset that holds the average of each statistic for each player.
+
+```{r}
+#filter out NAs
+combined_results <- na.omit(combined_results)
+
+#merge all rows on each player's matches into a single row which shows a summary of variables from each player's matches
+overall_results <- combined_results |>
+    group_by(player_name)|>
+    summarize(ace = mean(player_ace, na.rm=TRUE),
+              player_rank = mean(player_rank, na.rm=TRUE),
+              player_age = mean(player_age, na.rm=TRUE),
+              height = mean(player_ht, na.rm=TRUE),
+              df = mean(player_df, na.rm=TRUE),
+              first_in = mean(player_1stIn, na.rm=TRUE),
+              first_won = mean(player_1stWon, na.rm=TRUE),
+              second_won = mean(player_2ndWon, na.rm=TRUE))
+
+#remove player names as qualitative variable will be incompatible with certain functions
+overall_results_no_name <- select(overall_results, 2:9)
+
+print(overall_results_no_name)
+```
+
+Splitting the dataset into training and testing sets allowed for the calculation of the accuracy of our predictive model with unseen data.
+
+```{r}
+#set the seed
+set.seed(15)
+
+#split data into training and testing sets
+player_stats_split <- initial_split(overall_results_no_name, prop = 0.75, strata = player_rank)
+player_stats_train <- training(player_stats_split)
+player_stats_test <- testing(player_stats_split)
+
+#rename columns for summary table
+colnames(player_stats_train) <- c("Ace Rate", "Player Rank", "Player Age", "Height (cm)", "Double Fault Rate", 
+                                  "First Serve In Rate", "First Serve Won Rate ", "Second Serve Won Rate")
+
+#compute summary statistics for each variable 
+summary_table <- summary(player_stats_train)
+summary_table
+
+#return column names to previous convention
+colnames(player_stats_train) <- c("ace", "height", "df", "first_in", "first_won ", "second_won")
+```
+
+Based on the summary statistics, we can see that outliers have a minimal influence on the data (median and mean are almost equal), meaning they will not skew results which would limit the strength of conclusions.
+
 
